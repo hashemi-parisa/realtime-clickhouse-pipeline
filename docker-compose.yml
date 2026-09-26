@@ -1,0 +1,149 @@
+name: realtime-clickhouse-pipeline
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:${REDPANDA_VERSION}
+    container_name: realtime-redpanda
+
+    command:
+      - redpanda
+      - start
+
+      # Internal Kafka address is used by other containers.
+      # External Kafka address is used by applications on Windows.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+
+      # Kafka-compatible HTTP proxy
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+
+      # Schema Registry
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+
+      # Internal Redpanda RPC
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+
+      # Development configuration
+      - --mode=dev-container
+      - --smp=1
+      - --default-log-level=info
+
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "18082:18082"
+      - "19644:9644"
+
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+    networks:
+      - streaming_network
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "rpk cluster info --brokers localhost:9092 > /dev/null 2>&1"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+    restart: unless-stopped
+
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:${REDPANDA_CONSOLE_VERSION}
+    container_name: realtime-redpanda-console
+
+    entrypoint: /bin/sh
+
+    command:
+      - -c
+      - |
+        echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml
+        /app/console
+
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers:
+            - redpanda:9092
+
+        schemaRegistry:
+          enabled: true
+          urls:
+            - http://redpanda:8081
+
+        redpanda:
+          adminApi:
+            enabled: true
+            urls:
+              - http://redpanda:9644
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+    networks:
+      - streaming_network
+
+    restart: unless-stopped
+
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
+    container_name: realtime-clickhouse
+
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+
+    ports:
+      # Different host ports prevent conflicts with the previous project.
+      - "18123:8123"
+      - "19001:9000"
+
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+    networks:
+      - streaming_network
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "clickhouse-client --user \"$$CLICKHOUSE_USER\" --password \"$$CLICKHOUSE_PASSWORD\" --query \"SELECT 1\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+    restart: unless-stopped
+
+
+networks:
+  streaming_network:
+    name: realtime-streaming-network
+    driver: bridge
+
+
+volumes:
+  redpanda_data:
+  clickhouse_data:
+  clickhouse_logs:
