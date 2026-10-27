@@ -1,0 +1,23 @@
+name: Python tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  producer-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: producer/requirements.txt
+      - name: Install dependencies
+        run: pip install -r producer/requirements.txt
+      - name: Compile Python sources
+        run: python -m compileall -q producer
+      - name: Run unit tests
+        run: python -m unittest discover -s producer -p "test_*.py" -v

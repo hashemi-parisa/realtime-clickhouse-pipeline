@@ -100,6 +100,29 @@ services:
     restart: unless-stopped
 
 
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:${REDPANDA_VERSION}
+    container_name: realtime-redpanda-init
+
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        rpk topic create flight_search_events \
+          --brokers redpanda:9092 \
+          --partitions 3 \
+          --replicas 1 || true
+
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+    networks:
+      - streaming_network
+
+    restart: "no"
+
+
   clickhouse:
     image: clickhouse/clickhouse-server:${CLICKHOUSE_VERSION}
     container_name: realtime-clickhouse
@@ -120,6 +143,10 @@ services:
       - clickhouse_logs:/var/log/clickhouse-server
       - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
 
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+
     networks:
       - streaming_network
 
@@ -133,6 +160,29 @@ services:
       timeout: 5s
       retries: 12
       start_period: 15s
+
+    restart: unless-stopped
+
+
+  producer:
+    build:
+      context: ./producer
+    container_name: realtime-flight-search-producer
+
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_TOPIC: flight_search_events
+      EVENT_RATE_PER_SECOND: ${EVENT_RATE_PER_SECOND:-10}
+      RANDOM_SEED: ${RANDOM_SEED:-42}
+
+    depends_on:
+      redpanda-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+
+    networks:
+      - streaming_network
 
     restart: unless-stopped
 
