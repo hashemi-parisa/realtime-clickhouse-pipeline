@@ -48,3 +48,25 @@ SELECT
     max(dateDiff('millisecond', event_time, ingested_at)) AS max_ingestion_ms
 FROM realtime.flight_search_events
 WHERE event_time >= now() - INTERVAL 10 MINUTE;
+
+
+-- 5. Inspect malformed events captured by the dead-letter path.
+SELECT
+    failed_at,
+    topic,
+    partition,
+    offset,
+    kafka_timestamp,
+    raw_message,
+    substring(error_message, 1, 300) AS error_preview
+FROM realtime.flight_search_dead_letters
+ORDER BY failed_at DESC
+LIMIT 20;
+
+
+-- 6. Confirm that valid ingestion continues after a malformed event.
+SELECT
+    count() AS total_valid_events,
+    max(event_time) AS latest_valid_event,
+    dateDiff('second', max(event_time), now()) AS seconds_behind
+FROM realtime.flight_search_events;

@@ -1,6 +1,6 @@
 # Real-Time Flight Search Analytics with Redpanda and ClickHouse
 
-An end-to-end streaming analytics project that generates synthetic flight-search events, publishes them to a Kafka-compatible Redpanda topic, ingests them through the ClickHouse Kafka table engine, and incrementally builds hourly route metrics with materialized views.
+An end-to-end streaming analytics project that generates synthetic flight-search events, publishes them to a Kafka-compatible Redpanda topic, ingests valid events through the ClickHouse Kafka table engine, quarantines malformed messages, and incrementally builds hourly route metrics with materialized views.
 
 The project is intentionally small enough to run locally, while demonstrating the same ingestion and analytical patterns used in larger data platforms.
 
@@ -10,10 +10,14 @@ The project is intentionally small enough to run locally, while demonstrating th
 flowchart LR
     A[Python producer] -->|JSON events| B[Redpanda topic]
     B --> C[ClickHouse Kafka table]
-    C --> D[Raw-events materialized view]
+
+    C -->|Valid events| D[Raw-events materialized view]
     D --> E[MergeTree raw table]
     E --> F[Hourly materialized view]
     F --> G[AggregatingMergeTree metrics]
+
+    C -->|Malformed events| H[Dead-letter materialized view]
+    H --> I[Dead-letter MergeTree table]
 ```
 
 ## What the project demonstrates
@@ -23,6 +27,8 @@ flowchart LR
 - Durable raw-event storage using `MergeTree`
 - Incremental hourly aggregation using `AggregatingMergeTree`
 - Materialized views as the streaming transformation layer
+- Data-quality routing for malformed events
+- Dead-letter storage with Kafka topic, partition, offset, and parsing error
 - Partitioning and ordering choices for time-series analytical data
 - Reproducible synthetic data generation
 - Container health checks and dependency ordering
@@ -71,7 +77,7 @@ The startup sequence is:
 
 1. Redpanda becomes healthy.
 2. `redpanda-init` creates the `flight_search_events` topic with three partitions.
-3. ClickHouse creates the raw and aggregate tables and their materialized views.
+3. ClickHouse creates the raw, aggregate, and dead-letter tables and their materialized views.
 4. The Python producer begins publishing synthetic events.
 
 ### 3. Watch the producer
@@ -97,9 +103,35 @@ SELECT count(), min(event_time), max(event_time)
 FROM realtime.flight_search_events;
 ```
 
-The full verification query set is available in [`clickhouse/queries/verification.sql`](clickhouse/queries/verification.sql).
+The full verification query set, including dead-letter inspection and ingestion-health checks, is available in [`clickhouse/queries/verification.sql`](clickhouse/queries/verification.sql).
 
-### 5. Open Redpanda Console
+### 5. Test malformed-event handling
+
+Publish a deliberately invalid event from Git Bash, Linux, or macOS:
+
+```bash
+printf '%s\n' '{"event_time":"not-a-date","event_id":"not-a-uuid","origin":"THR","destination":"IST"}' \
+| docker exec -i realtime-redpanda rpk topic produce flight_search_events --brokers redpanda:9092
+```
+
+Inspect the captured message:
+
+```sql
+SELECT
+    failed_at,
+    topic,
+    partition,
+    offset,
+    raw_message,
+    error_message
+FROM realtime.flight_search_dead_letters
+ORDER BY failed_at DESC
+LIMIT 5;
+```
+
+Malformed messages are excluded from the main raw table. Their payload, parsing error, and Kafka metadata are retained for 30 days for investigation or replay.
+
+### 6. Open Redpanda Console
 
 Redpanda Console is available at:
 
@@ -132,6 +164,7 @@ docker compose down -v
 ├── .github/workflows/python-tests.yml
 ├── clickhouse
 │   ├── init/01_pipeline.sql
+│   ├── init/02_data_quality.sql
 │   └── queries/verification.sql
 ├── producer
 │   ├── Dockerfile
@@ -153,6 +186,10 @@ ClickHouse consumes directly from Redpanda through a Kafka-engine table. A mater
 
 Raw events remain available for debugging and new analytical questions. A second materialized view maintains hourly route aggregates so common route-level metrics do not need to scan the entire raw table.
 
+### Data quality and dead-letter handling
+
+The Kafka table uses `kafka_handle_error_mode = 'stream'`, which exposes parsing failures through the `_raw_message` and `_error` virtual columns. One materialized view filters valid events into the main raw table, while another routes malformed messages into a dedicated `MergeTree` dead-letter table together with their topic, partition, offset, and Kafka timestamp. This prevents a malformed message from stopping valid ingestion and preserves enough context for diagnosis and replay.
+
 ### Partition and sort keys
 
 The raw table is partitioned monthly and ordered by route, event time, and event ID. This supports time-range pruning and route-oriented queries while retaining a unique tie-breaker for events sharing a timestamp.
@@ -163,7 +200,7 @@ The producer models realistic route, price, device, and response-time distributi
 
 ## Current scope and next milestones
 
-Implemented in the first end-to-end milestone:
+Milestone 1 — end-to-end streaming pipeline:
 
 - Redpanda topic initialization
 - continuous synthetic event production
@@ -173,12 +210,19 @@ Implemented in the first end-to-end milestone:
 - verification and ingestion-latency queries
 - producer unit tests and CI
 
+Milestone 2 — data-quality handling:
+
+- valid and malformed event routing
+- durable dead-letter storage
+- Kafka metadata and parsing-error capture
+- 30-day retention for malformed messages
+- verification that valid ingestion continues after parsing failures
+
 Planned next:
 
-1. Add data-quality handling and a dead-letter path for malformed events.
-2. Add reproducible performance experiments for ordering keys and skip indexes.
-3. Add a lightweight dashboard for route, price, and ingestion-latency metrics.
-4. Document delivery semantics, failure cases, and recovery procedures.
+1. Add reproducible performance experiments for ordering keys and skip indexes.
+2. Add a lightweight dashboard for route, price, and ingestion-latency metrics.
+3. Document delivery semantics, failure cases, and recovery procedures.
 
 ## License
 
